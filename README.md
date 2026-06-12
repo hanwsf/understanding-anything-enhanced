@@ -42,7 +42,7 @@
 This is the enhanced version of Understand Anything for windows and Chinese, thanks to Lum1104.
 This is how it is looks like:
 <p align="center">
-  <a ><img src="assets\understand_domain.gif" alt="Lum1104%2FUnderstand-Anything" width="500"/></a>
+  <a ><img src="assets/understand_domain.gif" alt="Lum1104%2FUnderstand-Anything" width="500"/></a>
 </p>
 
 This time, the knowledge graph of 100k lines of code was built within 3 minutes. After opening the Dashboard:

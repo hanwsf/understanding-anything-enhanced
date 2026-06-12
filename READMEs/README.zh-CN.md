@@ -40,7 +40,7 @@
 这是Understand Anything加强版，特别是Windows和中文支持, thanks to Lum1104.
 看起来像这样：
 <p align="center">
-  <a ><img src="..\assets\understand_domain.gif" alt="Lum1104%2FUnderstand-Anything" width="500"/></a>
+  <a ><img src="../assets/understand_domain.gif" alt="Lum1104%2FUnderstand-Anything" width="500"/></a>
 
 </p>
     <p>这次,10 万行代码的知识图谱在 3 分钟内构建完成.打开 Dashboard:</p>
