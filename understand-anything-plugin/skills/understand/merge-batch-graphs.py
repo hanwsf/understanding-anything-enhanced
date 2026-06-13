@@ -1033,7 +1033,7 @@ def main() -> None:
     by_batch = _dd(list)
     unrecognized_batch_files: list[str] = []
     for f in batch_files:
-        m = re.match(r"batch-(\d+)(?:-part-(\d+))?\.json", f.name)
+        m = re.match(r"batch-(\d+)(?:-part-(\d+))?(?:-structure)?\.json", f.name)
         if m:
             by_batch[int(m.group(1))].append((f.name, int(m.group(2)) if m.group(2) else None))
         else:

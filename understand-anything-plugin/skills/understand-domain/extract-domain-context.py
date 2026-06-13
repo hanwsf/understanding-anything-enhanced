@@ -12,6 +12,7 @@ Output:
     <project-root>/.understand-anything/intermediate/domain-context.json
 """
 
+import argparse
 import json
 import os
 import re
@@ -95,8 +96,12 @@ ENTRY_POINT_PATTERNS: list[tuple[str, str, re.Pattern[str]]] = [
         r"""@(?:EventHandler|Subscribe|Listener|on_event)\s*\(\s*['"]([\w\-:.]+)['"]""",
     )),
     # Cron / scheduled
-    ("cron", "Cron schedule", re.compile(
+    ("cron", "Cron / scheduled task", re.compile(
         r"""@?(?:Cron|Schedule|Scheduled|crontab)\s*\(\s*['"]([^'"]+)['"]""",
+        re.IGNORECASE,
+    )),
+    ("cron", "PowerShell ScheduledJob", re.compile(
+        r"""Register-ScheduledJob\s+[-]Trigger\s+\{[^}]*\}[-]Name\s+['"]([^'"]+)['"]""",
         re.IGNORECASE,
     )),
     # GraphQL
@@ -233,8 +238,6 @@ def detect_entry_points(root: Path, file_paths: list[str]) -> list[dict[str, Any
 
                 if len(entry_points) >= MAX_ENTRY_POINTS:
                     break
-            if len(entry_points) >= MAX_ENTRY_POINTS:
-                break
 
     return entry_points
 
@@ -374,11 +377,12 @@ def _truncate_to_fit(context: dict[str, Any]) -> dict[str, Any]:
 
 
 def main() -> None:
-    if len(sys.argv) < 2:
-        print("Usage: python extract-domain-context.py <project-root>", file=sys.stderr)
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Extract domain context from a codebase")
+    parser.add_argument("project_root", help="Path to the project root directory")
+    parser.add_argument("--full", action="store_true", help="Force fresh scan even if cached context exists")
+    args = parser.parse_args()
 
-    project_root = Path(sys.argv[1]).resolve()
+    project_root = Path(args.project_root).resolve()
     if not project_root.is_dir():
         print(f"Error: {project_root} is not a directory", file=sys.stderr)
         sys.exit(1)

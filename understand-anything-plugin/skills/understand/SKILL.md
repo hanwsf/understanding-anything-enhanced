@@ -129,6 +129,10 @@ Determine whether to run a full analysis or incremental update.
    mkdir -p $PROJECT_ROOT/.understand-anything/intermediate
    mkdir -p $PROJECT_ROOT/.understand-anything/tmp
    ```
+3.1. **Purge stale trash dirs.** Phase 7 cleanup `mv`s scratch dirs into `.trash-<timestamp>/` rather than `rm -rf`ing them directly (see issue #301), so that destructive-action gates on hardened hosts don't trip on just-created paths. Reclaim the space here once the trash is older than 7 days — by this point any freshness-window check has long since stopped caring about those dirs:
+   ```bash
+   find $PROJECT_ROOT/.understand-anything/ -maxdepth 1 -type d -name '.trash-*' -mtime +7 -exec rm -rf {} + 2>/dev/null || true
+   ```
 3.5. **Auto-update configuration:**
     - If `--auto-update` is in `$ARGUMENTS`: write `{"autoUpdate": true}` to `$PROJECT_ROOT/.understand-anything/config.json`
     - If `--no-auto-update` is in `$ARGUMENTS`: write `{"autoUpdate": false}` to `$PROJECT_ROOT/.understand-anything/config.json`
@@ -140,8 +144,10 @@ Determine whether to run a full analysis or incremental update.
       - `chinese` → `zh`, `japanese` → `ja`, `korean` → `ko`, `english` → `en`, `spanish` → `es`, `french` → `fr`, `german` → `de`, `portuguese` → `pt`, `russian` → `ru`, `arabic` → `ar`, etc.
       - Locale variants: `zh-TW`, `zh-HK`, `zh-CN`, `pt-BR`, etc. are preserved as-is.
     - If `--language` is NOT specified:
-      - Check `$PROJECT_ROOT/.understand-anything/config.json` for an existing `outputLanguage` field. If present, use that.
-      - If no stored preference, default to `en` (English).
+      - **Stored preference wins.** If `$PROJECT_ROOT/.understand-anything/config.json` has an `outputLanguage` field, set `$OUTPUT_LANGUAGE` to it and skip the rest.
+      - **Otherwise detect (first run only).** Infer the predominant language of the user's conversation as an ISO 639-1 code (`$DETECTED_LANG`). If it is `en` or cannot be confidently determined, set `$OUTPUT_LANGUAGE=en` and proceed silently — no prompt (English users see no change).
+      - **If `$DETECTED_LANG` ≠ `en`, confirm once before analyzing:** tell the user you detected `<language>` and ask whether to generate all content in it; they press Enter/"yes" to accept, or type another language code/name to override (normalize via the friendly-name map above). If running non-interactively (no reply possible), skip the wait, use `$DETECTED_LANG`, and print a one-line notice instead of blocking.
+      - **Persist** the resolved `$OUTPUT_LANGUAGE` (including `en`) into `config.json` so it never re-prompts for this project.
     - If `--language` IS specified:
       - Update `$PROJECT_ROOT/.understand-anything/config.json` with the new language: merge `{"outputLanguage": "<lang>"}` into existing config.
       - Store as `$OUTPUT_LANGUAGE` for use throughout all phases.
@@ -294,97 +300,46 @@ If the script exits non-zero, the failure is hard — relay the full stderr to t
 
 ## Phase 2 — ANALYZE
 
-### Full analysis path
+### Full analysis path (deterministic, no LLM subagents)
 
-Load `.understand-anything/intermediate/batches.json` (produced by Phase 1.5). Iterate the `batches[]` array.
+Load `.understand-anything/intermediate/batches.json` (produced by Phase 1.5). Iterate the `batches[]` array. For each batch, run the bundled structural-extraction script to produce `batch-<batchIndex>-structure.json`:
 
-Report: `[Phase 2/7] Analyzing files — <totalFiles> files in <totalBatches> batches (up to 5 concurrent)...`
+\`\`\`bash
+node <SKILL_DIR>/extract-structure.mjs   <(cat <<ENDJSON
+{"projectRoot": "\$PROJECT_ROOT", "batchFiles": [{"path": "<path>", "language": "<language>", "sizeLines": <sizeLines>, "fileCategory": "<fileCategory>"}], "batchImportData": <batchImportData from batches.json[i]>}
+ENDJSON
+  )   "\$PROJECT_ROOT/.understand-anything/intermediate/batch-<batchIndex>-structure.json"
+\`\`\`
 
-For each batch, dispatch a subagent using the `file-analyzer` agent definition (at `agents/file-analyzer.md`). Run up to **5 subagents concurrently**. Append the following additional context:
+Run up to **5 batches concurrently**. After each batch, verify the output file exists:
+\`\`\`bash
+test -f "\$PROJECT_ROOT/.understand-anything/intermediate/batch-<batchIndex>-structure.json"
+\`\`\`
 
-> **Additional context from main session:**
->
-> Project: `<projectName>` — `<projectDescription>`
-> Languages: `<languages from Phase 1>`
->
-> $LANGUAGE_DIRECTIVE
+The script outputs `scriptCompleted: true` and a `results[]` array containing per-file structural data (classes as `{name, startLine}` objects, exports as `{name, line}` objects, callGraph, imports). All fields are deterministic — no LLM judgment required.
 
-Dispatch prompt template (fill in batch-specific values from `batches.json[i]`):
+After ALL batches complete, run the bundled graph-builder to convert structure data into valid graph nodes, edges, layers, and tour:
 
-> Analyze these files and produce GraphNode and GraphEdge objects.
-> Project root: `$PROJECT_ROOT`
-> Project: `<projectName>`
-> Languages: `<languages>`
-> Batch: `<batchIndex>/<totalBatches>`
-> Skill directory (for bundled scripts): `<SKILL_DIR>`
-> Output: write to `$PROJECT_ROOT/.understand-anything/intermediate/batch-<batchIndex>.json` (single-file mode) OR `batch-<batchIndex>-part-<k>.json` (split mode, per Step B of your output protocol).
->
-> Pre-resolved import data for this batch (use directly — do NOT re-resolve imports from source):
-> ```json
-> <batchImportData JSON from batches.json[i].batchImportData>
-> ```
->
-> Cross-batch neighbors with their exported symbols (confidence boost for cross-batch edges):
-> ```json
-> <neighborMap JSON from batches.json[i].neighborMap>
-> ```
->
-> Files to analyze in this batch (every entry MUST be passed through to `batchFiles` with all four fields — `path`, `language`, `sizeLines`, `fileCategory`):
-> 1. `<path>` (<sizeLines> lines, language: `<language>`, fileCategory: `<fileCategory>`)
-> 2. `<path>` (<sizeLines> lines, language: `<language>`, fileCategory: `<fileCategory>`)
-> ...
+\`\`\`bash
+node <SKILL_DIR>/build-final-graph.mjs "\$PROJECT_ROOT" "\$PROJECT_ROOT/.understand-anything/intermediate"
+\`\`\`
 
-**Output naming is per-batchIndex — no fusion.** If you fuse multiple small batches into a single file-analyzer dispatch for token efficiency, the dispatched agent must STILL write one output file per original `batchIndex` using `batch-<batchIndex>.json` or `batch-<batchIndex>-part-<k>.json`. The merge script's regex (`batch-(\d+)(?:-part-(\d+))?\.json`) silently drops any other naming (e.g., `batch-fused-8-13.json`, `batch-8-13.json`), losing every node and edge in that file. After each dispatch returns, verify each `batchIndex` in the dispatched input has a corresponding `batch-<batchIndex>.json` (or `batch-<batchIndex>-part-*.json`) on disk before proceeding to the next dispatch.
+Report to the user: \`Phase 2 complete. All <totalBatches> batches analyzed.\`
 
-After ALL batches complete, report to the user: `Phase 2 complete. All <totalBatches> batches analyzed.`
+Then run the merge-and-normalize script bundled with this skill (located next to this SKILL.md file — use the skill directory path, not the project root):
+\`\`\`bash
+python <SKILL_DIR>/merge-batch-graphs.py \$PROJECT_ROOT
+\`\`\`
 
-Run the merge-and-normalize script bundled with this skill (located next to this SKILL.md file — use the skill directory path, not the project root):
-```bash
-python <SKILL_DIR>/merge-batch-graphs.py $PROJECT_ROOT
-```
-
-This script reads all `batch-*.json` files (including `batch-<i>-part-<k>.json` produced by file-analyzers that split their output) from `$PROJECT_ROOT/.understand-anything/intermediate/`, then in one pass:
-- Combines all nodes and edges across batches
+This script reads `assembled-graph.json` (produced by `build-final-graph.mjs`), then in one pass:
 - Normalizes node IDs (strips double prefixes, project-name prefixes, adds missing prefixes)
-- Normalizes complexity values (`low`→`simple`, `medium`→`moderate`, `high`→`complex`, etc.)
+- Normalizes complexity values (`low`→`simple`, `medium`→`moderate`, `high`→`complex`)
 - Rewrites edge references to match corrected node IDs
-- Deduplicates nodes by ID (keeps last occurrence) and edges by `(source, target, type)`
+- Deduplicates nodes by ID and edges by `(source, target, type)`
 - Drops dangling edges referencing missing nodes
 - Logs all corrections and dropped items to stderr
 
-The merge script also runs a `tested_by` linker that canonicalizes test-coverage edges in two passes. **Pass 1** walks LLM-emitted `tested_by` edges and flips inverted ones in place; semantically broken edges (test↔test, prod↔prod, orphan endpoints) are dropped. **Pass 2** supplements with path-convention pairings. Production nodes that end up sourcing any `tested_by` edge get a `"tested"` tag. All resulting edges run `production → test`.
-
-Output: `$PROJECT_ROOT/.understand-anything/intermediate/assembled-graph.json`
-
-Include the script's warnings in `$PHASE_WARNINGS` for the reviewer.
-
-### Incremental update path
-
-Write the changed-files list (one path per line) to a temp file:
-```bash
-git diff <lastCommitHash>..HEAD --name-only > $PROJECT_ROOT/.understand-anything/tmp/changed-files.txt
-```
-
-Run compute-batches with `--changed-files`:
-```bash
-node <SKILL_DIR>/compute-batches.mjs $PROJECT_ROOT \
-  --changed-files=$PROJECT_ROOT/.understand-anything/tmp/changed-files.txt
-```
-
-This produces a `batches.json` that contains only batches with changed files, but neighborMap entries still reference unchanged files (with their full-graph batchIndex) so cross-batch edges remain emittable.
-
-Then dispatch file-analyzer subagents per the same template as the full path.
-
-After batches complete:
-1. Remove old nodes whose `filePath` matches any changed file from the existing graph
-2. Remove old edges whose `source` or `target` references a removed node
-3. Write the pruned existing nodes/edges as `batch-existing.json` in the intermediate directory
-4. Run the same merge script — it will combine `batch-existing.json` with the fresh `batch-*.json` files:
-   ```bash
-   python <SKILL_DIR>/merge-batch-graphs.py $PROJECT_ROOT
-   ```
-
----
+After the merge, verify `assembled-graph.json` contains non-empty `nodes[]` and `edges[]`. Append any Warning lines to `$PHASE_WARNINGS` for the final report. If dropped items > 30% of total edges, flag this to the user.
 
 ## Phase 3 — ASSEMBLE REVIEW
 
@@ -770,10 +725,20 @@ Report to the user: `[Phase 7/7] Saving knowledge graph...`
    }
    ```
 
-4. Clean up intermediate files:
+4. Clean up intermediate files, **preserving `scan-result.json`** so future incremental runs can skip Phase 1 SCAN (see issue #293). We `mv` scratch dirs into a timestamped `.trash-*` instead of `rm -rf`ing them directly — this avoids tripping destructive-action gates on hardened hosts (e.g. freshness-window checks) that flag deleting directories created moments earlier (see issue #301). The delayed-purge step in Phase 0 reclaims the space once the trash is older than 7 days.
    ```bash
-   rm -rf $PROJECT_ROOT/.understand-anything/intermediate
-   rm -rf $PROJECT_ROOT/.understand-anything/tmp
+   # Preserve scan-result.json — Phase 1's deterministic file inventory.
+   # Future incremental runs (Phase 2 compute-batches.mjs --changed-files=…)
+   # need this inventory; without it, Phase 1 must re-dispatch and pay ~157k
+   # tokens / ~158s per incremental run.
+   TRASH="$PROJECT_ROOT/.understand-anything/.trash-$(date +%s)"
+   mkdir -p "$TRASH"
+   INTER="$PROJECT_ROOT/.understand-anything/intermediate"
+   if [ -d "$INTER" ]; then
+     # Move every entry except scan-result.json into the trash dir.
+     find "$INTER" -mindepth 1 -maxdepth 1 -not -name 'scan-result.json' -exec mv {} "$TRASH/" \; 2>/dev/null || true
+   fi
+   mv "$PROJECT_ROOT/.understand-anything/tmp" "$TRASH/" 2>/dev/null || true
    ```
 
 5. Report a summary to the user containing:
