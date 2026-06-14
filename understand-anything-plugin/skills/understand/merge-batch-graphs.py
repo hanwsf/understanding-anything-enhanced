@@ -1088,6 +1088,27 @@ def main() -> None:
     # merged graph with content the agent labeled incorrectly.
     unrecognized_set = set(unrecognized_batch_files)
     batches: list[dict[str, Any]] = []
+
+    # Check if assembled-graph.json already exists (from build-final-graph.mjs)
+    fallback_paths = [
+        intermediate_dir / "assembled-graph.json",
+        project_root / ".understand-anything" / "knowledge-graph.json",
+    ]
+    for p in fallback_paths:
+        if p.is_file():
+            try:
+                fallback_graph = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(fallback_graph.get("nodes"), list):
+                    print(f"Notice: merge-batch-graphs: using fallback graph at {p.name}", file=sys.stderr)
+                    n = len(fallback_graph.get("nodes", []))
+                    e = len(fallback_graph.get("edges", []))
+                    print(f" {p.name}: {n} nodes, {e} edges", file=sys.stderr)
+                    batches = [fallback_graph]
+                    batch_files = []
+                    break
+            except (OSError, json.JSONDecodeError):
+                pass
+
     for f in batch_files:
         if f.name in unrecognized_set:
             continue
